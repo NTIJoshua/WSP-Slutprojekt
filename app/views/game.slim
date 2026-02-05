@@ -1,0 +1,15 @@
+h2 Game
+p Location: #{@player[:location]}
+p Health: #{@player[:health]} / #{@player[:max_health]}
+p Attack: #{@player[:attack]}
+p Defense: #{@player[:defense]}
+p Gold: #{@player[:gold]}
+
+form method="get" action="/combat"
+  button type="submit" Find Enemy
+
+form method="get" action="/inventory"
+  button type="submit" Inventory
+
+form method="post" action="/logout"
+  button type="submit" Logout

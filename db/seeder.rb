@@ -1,41 +1,16 @@
-require 'sqlite3'
+require "sqlite3"
 
-db = SQLite3::Database.new("databas.db")
+db_path = File.expand_path("rpg.sqlite3", __dir__)
+schema_path = File.expand_path("schema.sql", __dir__)
+seed_path = File.expand_path("seed.sql", __dir__)
 
+db = SQLite3::Database.new(db_path)
+db.execute("PRAGMA foreign_keys = ON;")
 
-def seed!(db)
-  puts "Using db file: db/todos.db"
-  puts "🧹 Dropping old tables..."
-  drop_tables(db)
-  puts "🧱 Creating tables..."
-  create_tables(db)
-  puts "🍎 Populating tables..."
-  populate_tables(db)
-  puts "✅ Done seeding the database!"
-end
+schema_sql = File.read(schema_path)
+seed_sql = File.read(seed_path)
 
-def drop_tables(db)
-  db.execute('DROP TABLE IF EXISTS exempel')
-end
+db.execute_batch(schema_sql)
+db.execute_batch(seed_sql)
 
-def create_tables(db)
-  db.execute('CREATE TABLE exempel (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              name TEXT NOT NULL, 
-              description TEXT,
-              state BOOLEAN)')
-end
-
-def populate_tables(db)
-  db.execute('INSERT INTO exempel (name, description, state) VALUES ("Köp mjölk", "3 liter mellanmjölk, eko",false)')
-  db.execute('INSERT INTO exempel (name, description, state) VALUES ("Köp julgran", "En rödgran",false)')
-  db.execute('INSERT INTO exempel (name, description, state) VALUES ("Pynta gran", "Glöm inte lamporna i granen och tomten",false)')
-end
-
-
-seed!(db)
-
-
-
-
-
+puts "Database seeded: #{db_path}"

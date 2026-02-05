@@ -1,0 +1,26 @@
+h2 Combat
+
+- if @error
+  p= @error
+
+- if @enemy
+  p Enemy: #{@enemy[:name]}
+  p Enemy Health: #{@enemy[:health]}
+
+- if @combat_log
+  - @combat_log.each do |line|
+    p= line
+
+- if @enemy_defeated
+  p You won the fight.
+  form method="get" action="/game"
+    button type="submit" Back to Game
+- elsif @enemy
+  form method="post" action="/combat/attack"
+    input type="hidden" name="enemy_id" value="#{@enemy[:id]}"
+    button type="submit" Attack
+  form method="get" action="/game"
+    button type="submit" Run
+- else
+  form method="get" action="/game"
+    button type="submit" Back

@@ -1,0 +1,18 @@
+h2 Inventory
+
+- if @error
+  p= @error
+
+- if @inventory.empty?
+  p Your inventory is empty.
+- else
+  ul
+    - @inventory.each do |item|
+      li
+        strong= item[:name]
+        |  (x#{item[:quantity]}) - #{item[:description]}
+        form method="post" action="/use_item/#{item[:id]}"
+          button type="submit" Use
+
+form method="get" action="/game"
+  button type="submit" Back to Game
