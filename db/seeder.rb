@@ -1,16 +1,23 @@
-require "sqlite3"
+require 'sqlite3'
+require_relative 'seeder2'
 
-db_path = File.expand_path("rpg.sqlite3", __dir__)
-schema_path = File.expand_path("schema.sql", __dir__)
-seed_path = File.expand_path("seed.sql", __dir__)
-
+db_path = File.expand_path('brutus.db', __dir__)
 db = SQLite3::Database.new(db_path)
-db.execute("PRAGMA foreign_keys = ON;")
 
-schema_sql = File.read(schema_path)
-seed_sql = File.read(seed_path)
+def seed!(db, db_path)
+  puts "Using db file: #{db_path}"
+  db.execute('PRAGMA foreign_keys = ON')  
+  
+  puts 'Dropping old tables...'
+  drop_tables(db)
+  
+  puts 'Creating tables...'
+  create_tables(db)
 
-db.execute_batch(schema_sql)
-db.execute_batch(seed_sql)
+  puts 'Populating seed data...'
+  populate_static_data(db)
 
-puts "Database seeded: #{db_path}"
+  puts 'Done seeding the database!'
+end
+
+seed!(db,db_path)

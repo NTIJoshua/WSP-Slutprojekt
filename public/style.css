@@ -1,0 +1,39 @@
+body {
+  font-family: sans-serif;
+  color: #111111;
+  background-color: #f1f1f1;
+  font-size: x-large;
+  margin: 1em;
+}
+
+header {
+  color: #111111;
+  background-color: lightcyan;
+  font-family: fantasy;
+  
+}
+
+
+.title {
+  font-family: serif;
+  color: blanchedalmond;
+}
+
+header a {
+  color: #111111;
+  font-weight: bold;
+  text-decoration: none;
+  text-align: center;
+  display: inline-block;
+  padding: 10px 20px;
+  border: solid lightcyan;
+  background-color: lightcyan;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+p {
+  font-weight: bold;
+}

@@ -1,368 +1,609 @@
-﻿require "sinatra"
-require "sinatra/reloader"
-require "slim"
-require "sqlite3"
-require "bcrypt"
-require "time"
+﻿require 'sinatra'
+require 'sqlite3'
+require 'slim'
+require 'sinatra/reloader'
+require 'bcrypt'
 
-configure do
-  set :root, File.expand_path(__dir__)
-  set :views, File.expand_path("app/views", __dir__)
-  set :slim, escape_html: true
-  enable :sessions
-  set :session_secret, "change_me"
-end
 
-configure :development do
-  register Sinatra::Reloader
-end
 
-module DB
-  def self.connection
-    return @connection if @connection
+enable :session
 
-    db_path = File.expand_path("db/rpg.sqlite3", __dir__)
-    @connection = SQLite3::Database.new(db_path)
-    @connection.results_as_hash = true
-    @connection.execute("PRAGMA foreign_keys = ON;")
-    @connection
-  end
+post('/register') do
+    user = params["user"]
+    pwd = params["pwd"]
+    pwd_confirm = params["pwd_confirm"]
+    
+    db = SQLite3::Database.new("db/brutus.db")
+    result = db.execute("SELECT id FROM users WHERE name=?",user)
 
-  def self.row_to_hash(row)
-    return nil unless row
-
-    hash = {}
-    row.each do |key, value|
-      next if key.is_a?(Integer)
-
-      hash[key.to_sym] = value
-    end
-    hash
-  end
-
-  def self.rows_to_hashes(rows)
-    rows.map { |row| row_to_hash(row) }
-  end
-
-  def self.query_one(sql, params = [])
-    stmt = connection.prepare(sql)
-    row = stmt.execute(*params).next
-    stmt.close
-    row_to_hash(row)
-  end
-
-  def self.query_all(sql, params = [])
-    stmt = connection.prepare(sql)
-    rows = stmt.execute(*params).to_a
-    stmt.close
-    rows_to_hashes(rows)
-  end
-
-  def self.execute(sql, params = [])
-    stmt = connection.prepare(sql)
-    stmt.execute(*params)
-    stmt.close
-  end
-
-  def self.create_user(username, password_hash)
-    execute(
-      "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
-      [username, password_hash, Time.now.utc.iso8601]
-    )
-    connection.last_insert_row_id
-  end
-
-  def self.find_user_by_username(username)
-    query_one("SELECT * FROM users WHERE username = ?", [username])
-  end
-
-  def self.find_user_by_id(user_id)
-    query_one("SELECT * FROM users WHERE id = ?", [user_id])
-  end
-
-  def self.create_player_for_user(user_id)
-    execute(
-      "INSERT INTO players (user_id, health, max_health, attack, defense, gold, location) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      [user_id, 20, 20, 4, 1, 0, "battlefield"]
-    )
-    connection.last_insert_row_id
-  end
-
-  def self.load_player(user_id)
-    query_one("SELECT * FROM players WHERE user_id = ?", [user_id])
-  end
-
-  def self.update_player(player_hash)
-    execute(
-      "UPDATE players SET health = ?, max_health = ?, attack = ?, defense = ?, gold = ?, location = ? WHERE id = ?",
-      [
-        player_hash[:health],
-        player_hash[:max_health],
-        player_hash[:attack],
-        player_hash[:defense],
-        player_hash[:gold],
-        player_hash[:location],
-        player_hash[:id]
-      ]
-    )
-  end
-
-  def self.get_inventory(player_id)
-    query_all(
-      "SELECT inventories.id AS inventory_id, items.*, inventories.quantity
-       FROM inventories
-       JOIN items ON items.id = inventories.item_id
-       WHERE inventories.player_id = ?",
-      [player_id]
-    )
-  end
-
-  def self.find_item_by_id(item_id)
-    query_one("SELECT * FROM items WHERE id = ?", [item_id])
-  end
-
-  def self.add_item(player_id, item_id, quantity = 1)
-    row = query_one(
-      "SELECT * FROM inventories WHERE player_id = ? AND item_id = ?",
-      [player_id, item_id]
-    )
-    if row
-      execute(
-        "UPDATE inventories SET quantity = ? WHERE id = ?",
-        [row[:quantity] + quantity, row[:id]]
-      )
+    if result.empty?
+        if pwd == pwd_confirm
+            pwd_digest = BCrypt::Password.create(pwd)
+            db.execute("INSERT INTO users(name, pwd_digest) VALUES(?,?)", [user, pwd_digest])
+            redirect('/')
+        else
+            redirect('/register')
+        end
     else
-      execute(
-        "INSERT INTO inventories (player_id, item_id, quantity) VALUES (?, ?, ?)",
-        [player_id, item_id, quantity]
-      )
+        redirect('/register')
     end
-  end
 
-  def self.remove_item(player_id, item_id, quantity = 1)
-    row = query_one(
-      "SELECT * FROM inventories WHERE player_id = ? AND item_id = ?",
-      [player_id, item_id]
-    )
-    return unless row
+end
 
-    new_qty = row[:quantity] - quantity
-    if new_qty <= 0
-      execute("DELETE FROM inventories WHERE id = ?", [row[:id]])
+get('/') do
+    if session[:user_id] == nil
+        redirect('/login')
+    end
+    id = params[:id].to_i
+    db = SQLite3::Database.new("db/brutus.db")
+    result = db.execute("SELECT * FROM users WHERE name=?",user)
+    slim(:home)
+end
+
+
+
+get('/register') do
+    session.clear
+    slim(:register)
+end
+
+get('/login') do
+    session.clear
+    slim(:login)
+end
+
+post('/login') do
+    user = params["user"]
+    pwd = params["pwd"]
+
+    db = SQLite3::Database.new("db/brutus.db")
+    db.results_as_hash = true
+    result = db.execute("SELECT id, pwd_digest FROM users WHERE name=?",user)
+
+    if result.empty?
+        redirect('/error')
+    end
+
+    user_id = result.first["id"]
+    pwd_digest = result.first["pwd_digest"]
+
+    if BCrypt::Password.new(pwd_digest) == pwd
+        session[:user_id] = user_id
+        redirect('/')
     else
-      execute("UPDATE inventories SET quantity = ? WHERE id = ?", [new_qty, row[:id]])
-    end
-  end
-
-  def self.spawn_enemy(_location)
-    query_one("SELECT * FROM enemies ORDER BY RANDOM() LIMIT 1")
-  end
-end
-
-module CombatEngine
-  def self.resolve(player, enemy)
-    log = []
-
-    player_attack = [player[:attack] - enemy[:defense], 1].max
-    enemy_attack = [enemy[:attack] - player[:defense], 1].max
-
-    enemy_health = enemy[:health] - player_attack
-    log << "You strike the #{enemy[:name]} for #{player_attack} damage."
-
-    if enemy_health <= 0
-      log << "The #{enemy[:name]} falls."
-      updated_player = player.merge(
-        gold: player[:gold] + enemy[:gold_reward]
-      )
-      return {
-        player: updated_player,
-        enemy: enemy.merge(health: 0),
-        log: log,
-        enemy_defeated: true,
-        outcome: :win
-      }
+        redirect('/error')
     end
 
-    player_health = player[:health] - enemy_attack
-    log << "The #{enemy[:name]} hits you for #{enemy_attack} damage."
-
-    outcome = player_health <= 0 ? :lose : :draw
-    {
-      player: player.merge(health: player_health),
-      enemy: enemy.merge(health: enemy_health),
-      log: log,
-      enemy_defeated: false,
-      outcome: outcome
-    }
-  end
 end
 
-module InventoryEngine
-  def self.use_item(player, item)
-    case item[:item_type]
-    when "heal"
-      heal = item[:heal_amount].to_i
-      new_health = [player[:health] + heal, player[:max_health]].min
-      {
-        player: player.merge(health: new_health),
-        log: "You use #{item[:name]} and recover #{new_health - player[:health]} health.",
-        consumed: true
-      }
-    else
-      {
-        player: player,
-        log: "Nothing happens.",
-        consumed: false
-      }
+
+
+COLORS = {
+  red: "\e[31m",
+  green: "\e[32m",
+  yellow: "\e[33m",
+  blue: "\e[34m",
+  magenta: "\e[35m",
+  cyan: "\e[36m",
+  reset: "\e[0m"
+}
+
+def initialize
+  @game_over = false
+  @current_room = :battlefield
+  @player_inventory = []
+  @game_state = {
+    robbert_trust: 0,
+    knows_about_invasion: false,
+    found_parents: false,
+    boulder_event: false,
+    hearing_fighting_battlefield: false,
+    next_to_robbert: true,
+    at_battlefield: true,
+    equipped_chestplate: false,
+    equipped_helmet: false,
+    equipped_leggings: false,
+    name_lie: false,
+    yourself_question: false
+  }
+  
+  @level = 1
+  @experience = 0
+  @playername = ""
+  @health = rand(5..10)
+  @time = "afternoon"
+  @day = 1
+  @thehour = 13
+  @theminute = 10
+  @enemies = {
+    "stragglers" => { hp: 15, damage: 3, xp: 10 },
+    "imperialscout" => { hp: 20, damage: 5, xp: 15 },
+    "mercenary" => { hp: 25, damage: 6, xp: 20 }
+  }
+end
+
+def start
+  character_creation
+  introduction_dialogue  
+  puts "\nType 'help' for a list of commands.\n"
+  game_loop
+end
+
+def character_creation
+  system('cls')
+  sleep 1
+  puts "???: What's your name, kid?"
+  sleep 1
+  puts "#{colorize('He stretches out his war-torn hand.', :green)}"
+  @playername = gets.chomp
+  sleep 1
+  puts "#{colorize('*You grab his hand and pull yourself up*', :green)}"
+  sleep 2
+  puts "You: My name is #{player_name}."
+  sleep 2
+  if @playername.length > 10
+    puts "???: What?? That's too long!\n???: At least give me a nickname I can use!"
+    @playername = gets.chomp
+  end
+
+  while @playername.include?("Brutus") || @playername.length >= 10 || @playername.length <= 2 || @playername.include?(' ')
+    puts "???: Stop lying. No parent would name their child that."
+    sleep 0.7
+    if !@game_state[:name_lie]
+      @game_state[:robbert_trust] -= 2
+      @game_state[:name_lie] = true
     end
-  end
-end
-
-helpers do
-  def current_user
-    return nil unless session[:user_id]
-
-    DB.find_user_by_id(session[:user_id])
+    puts "???: What's your actual name?"
+    @playername = gets.chomp
   end
 
-  def current_player
-    return nil unless session[:user_id]
-
-    DB.load_player(session[:user_id])
-  end
-
-  def require_login
-    return if current_user
-
-    redirect "/login"
-  end
-
-  def flash_message
-    msg = session.delete(:flash)
-    msg unless msg.to_s.empty?
-  end
-end
-
-before do
-  pass if ["/login", "/register"].include?(request.path_info)
-  require_login
-end
-
-get "/" do
-  redirect "/game"
-end
-
-get "/register" do
-  slim :register
-end
-
-post "/register" do
-  username = params[:username].to_s.strip
-  password = params[:password].to_s
-
-  if username.empty? || password.empty?
-    @error = "Username and password are required."
-    return slim :register
-  end
-
-  existing = DB.find_user_by_username(username)
-  if existing
-    @error = "That username is taken."
-    return slim :register
-  end
-
-  password_hash = BCrypt::Password.create(password)
-  user_id = DB.create_user(username, password_hash)
-  DB.create_player_for_user(user_id)
-
-  session[:user_id] = user_id
-  redirect "/game"
-end
-
-get "/login" do
-  slim :login
-end
-
-post "/login" do
-  username = params[:username].to_s.strip
-  password = params[:password].to_s
-
-  user = DB.find_user_by_username(username)
-  if user && BCrypt::Password.new(user[:password_hash]) == password
-    session[:user_id] = user[:id]
-    redirect "/game"
+  firstletter = @playername[0]&.upcase
+  case firstletter
+  when "S"
+    puts "???: #{player_name}, huh? Strong name. Don't worry, I've been on more battlefields than you can count. I'll get you out of here."
+  when "G"
+    puts "???: #{player_name}, huh..?"
+    puts "#{colorize('He looks at you strangely', :green)}."
+  when "J"
+    puts "???: #{player_name}, huh? An honorable name. I can tell you'll be great. Don't worry, I've been on more battlefields than you can count. I'll get you out of here."
+  when "H"
+    puts "???: #{player_name}, huh? A name of vice. Don't worry, I've been on more battlefields than you can count. I'll get you out of here."
+  when "A"
+    puts "???: #{player_name}, huh? A wise name. Don't worry, I've been on more battlefields than you can count. I'll get you out of here."
+  when "N"
+    puts "???: #{player_name}, huh? An interesting name. Don't worry, I've been on more battlefields than you can count. I'll get you out of here."
+  when "R"
+    puts "???: #{player_name}, huh? Peculiar name. Don't worry, I've been on more battlefields than you can count. I'll get you out of here."
+  when "X"
+    puts "???: #{player_name}..? Fascinating name. 'X' just so happens to be my favorite letter. I can tell we'll get along well."
   else
-    @error = "Invalid credentials."
-    slim :login
+    puts "???: #{player_name}, huh? Don't worry, I've been on more battlefields than you can count. I'll get you out of here."
   end
 end
 
-post "/logout" do
-  session.clear
-  redirect "/login"
+def game_loop
+  until @game_over
+    print "> "
+    input = gets.chomp.downcase.strip
+    
+    next if handle_special_commands(input)
+    
+    command, *params = input.split
+    case command
+    when 'look'
+      describe_room
+    when 'go', 'move'
+      direction = params.first
+      move_to(direction)
+    when 'talk', 'ask'
+      topic = params.join(' ')
+      handle_dialogue(topic)
+    when 'take', 'get'
+      item = params.join(' ')
+      take_item(item)
+    when 'use'
+      item = params.join(' ')
+      use_item(item)
+    when 'equip'
+      item = params.join(' ')
+      equip(item)
+    when 'inventory', 'items'
+      show_inventory
+    when 'attack'
+      enemy = params.join(' ')
+      enemy_types = ["Stragglers", "Imperial Scout", "Mercenary"]
+      nevermind = ["no", "nevermind", "stop", "quit"]
+      if !enemy_types.include?(enemy)
+        puts "Who are you attacking?"
+        puts "Valid choices:\nStragglers\nMercenary\nImperial Scout"
+        print "> "
+        enemy = gets.chomp.downcase.strip
+        if nevermind.include?(enemy)
+          puts "Tragedy averted."
+        end
+          
+      end
+      initiate_combat(enemy)
+    when 'stats'
+      show_stats
+    when 'wait'
+      advance_time
+    when 'unequip'
+      item = params.join(' ')
+      unequip(item)
+    when 'help'
+      show_help
+    when 'quit', 'exit'
+      @game_over = true
+    when 'listen'
+      ''
+    else
+      puts "I don't understand that command."
+    end
+  end
+  puts "Thanks for playing, #{player_name}."
 end
 
-get "/game" do
-  # Load from DB on every request
-  @player = current_player
-  @inventory = DB.get_inventory(@player[:id])
-  slim :game
-end
-
-get "/combat" do
-  # Load player, then pick enemy based on current DB state
-  @player = current_player
-  @enemy = DB.spawn_enemy(@player[:location])
-  slim :combat
-end
-
-post "/combat/attack" do
-  # Load -> compute -> persist -> render
-  @player = current_player
-  enemy_id = params[:enemy_id].to_i
-  @enemy = DB.query_one("SELECT * FROM enemies WHERE id = ?", [enemy_id])
-
-  unless @enemy
-    @error = "Enemy not found."
-    return slim :combat
+def introduction_dialogue
+  sleep 4
+  if @playername[0]&.upcase == "G"
+    puts "#{player_name}: ...Who are you?"
+  else
+    puts "#{player_name}: Who are you?"
   end
 
-  result = CombatEngine.resolve(@player, @enemy)
-  @combat_log = result[:log]
-  @enemy_defeated = result[:enemy_defeated]
-  @player = result[:player]
+  puts "\n???: Who am I? The name's #{colorize('Robbert', :blue)}, a mercenary, nice to meet'cha."
+  sleep 4
+  puts "#{colorize('Robbert', :blue)}: By the way, how'd you get in this mess? How old are you even?"
+  sleep 4
+  
+  # Player's response options
+  puts "\nHow do you respond?"
+  puts "1. Tell the full truth"
+  puts "2. Lie about your age"
+  puts "3. Stay silent"
+  print "> "
+  answer = gets.chomp.to_i
 
-  # Always persist updated state
-  DB.update_player(@player)
-  slim :combat
-end
-
-get "/inventory" do
-  # Load from DB each time
-  @player = current_player
-  @inventory = DB.get_inventory(@player[:id])
-  slim :inventory
-end
-
-post "/use_item/:id" do
-  # Load -> compute -> persist -> redirect
-  @player = current_player
-  item_id = params[:id].to_i
-  item = DB.find_item_by_id(item_id)
-
-  unless item
-    @error = "Item not found."
-    return redirect "/inventory"
+  case answer
+  when 1
+    puts "#{player_name}: I'm twelve. Both of my parents went missing some days ago."
+    @game_state[:robbert_trust] += 2
+    sleep 4
+  when 2
+    puts "#{player_name}: I'm... sixteen. I got separated from my unit."
+    @game_state[:robbert_trust] -= 1
+    sleep 3
+    puts "#{colorize('Robbert', :blue)}: ...My condolences. Then again, you're probably not the only one."
+    sleep 3
+    puts "#{colorize('Robbert', :blue)}: Wouldn't surprise me if the churches were working their asses off right now."
+    sleep 3
+  else
+    puts "#{player_name}: ..."
+    puts "#{colorize('Robbert', :blue)}: Tough kid, eh? Alright then."
+    sleep 3
   end
-
-  result = InventoryEngine.use_item(@player, item)
-  @player = result[:player]
-  # Persist player changes
-  DB.update_player(@player)
-
-  # Persist inventory changes
-  DB.remove_item(@player[:id], item_id, 1) if result[:consumed]
-
-  session[:flash] = result[:log]
-  redirect "/inventory"
+  puts "#{colorize('*You take a look around*', :green)}"
+  @game_state[:knows_about_invasion] = true
+  sleep 4
+  describe_room
 end
+
+def show_help
+  puts "Available commands:"
+  puts "look - Describe current location"
+  puts "go/move [direction] - Move to new area"
+  puts "search - Look for items"
+  puts "listen - Listen to your surroundings"
+  puts "examine - Examine something interesting"
+  puts "approach - Get closer to something"
+  puts "talk/ask [topic] - Ask about something"
+  puts "take/get [item] - Pick up an item"
+  puts "use [item] - Use an item from your inventory"
+  puts "equip [item] - Equip an item"
+  puts "unequip [item] - Unequip an item"
+  puts "inventory/items - Show your inventory"
+  puts "attack - Fight enemies"
+  puts "wait - Pass time"
+  puts "stats - Show your status"
+  puts "help - Show this menu"
+  puts "quit/exit - End the game"
+end
+
+def show_stats
+  puts "#{player_name}, Level #{@level}"
+  puts "health: #{@health}"
+  puts "Experience: #{@experience}/#{@level * 10}"
+  puts "Weapon: #{current_weapon[:name]} (#{current_weapon[:damage]} damage)"
+end
+
+def initiate_combat(enemy)
+  nevermind = ["no", "nevermind", "stop", "exit", "quit"]
+  
+  if nevermind.include?(enemy) || !@enemies.key?(enemy.downcase)
+    return false
+  end
+  
+  enemy_key = enemy.downcase  
+  puts "\nYou encounter #{enemy}! Battle begins!"
+  @game_state[:next_to_robbert] = false
+  enemy_stats = @enemies[enemy_key]
+  enemy_hp = enemy_stats[:hp]
+  
+  while enemy_hp > 0
+    puts "\nEnemy HP: #{enemy_hp}"
+    puts "Your HP: #{@health}"
+    puts "\nWhat will you do?"
+    puts "1. Attack"
+    puts "2. Run"
+    print "> "
+    choice = gets.strip.to_s.downcase
+    
+    case choice
+    when "1", "attack"
+      puts ""
+      player_damage = current_weapon[:damage] + rand(1..3)
+      puts "You attack with your #{current_weapon[:name]} and deal #{player_damage} damage!"
+      enemy_hp -= player_damage
+      
+      if enemy_hp <= 0
+        puts "You defeated the #{enemy}!"
+        gain_experience(enemy_stats[:xp])
+        loot_chance(enemy)
+        @game_state[:next_to_robbert] = true
+        break
+      end
+      
+      enemy_damage = enemy_stats[:damage] + rand(0..2)
+      puts "The #{enemy} attacks you for #{enemy_damage} damage!"
+      @health -= enemy_damage
+      
+      if @health <= 0
+        puts "You have been defeated..."
+        @game_over = true
+        break
+      end
+    when "2", "run"
+      escape_chance = rand(1..10)
+      if escape_chance > 5
+        puts "You managed to escape!"
+        break
+      else
+        puts "You couldn't escape!"
+        enemy_damage = enemy_stats[:damage] + rand(0..2)
+        puts "The #{enemy} attacks you for #{enemy_damage} damage!"
+        @health -= enemy_damage
+        
+        if @health <= 0
+          puts "You have been defeated..."
+          @game_over = true
+          break
+        end
+      end
+    else
+      puts "Invalid choice!"
+    end
+  end
+end
+
+def loot_chance(enemy)
+  chance = rand(1..10)
+  case enemy
+  when "stragglers"
+    if chance > 7
+      puts "You found some bandages!"
+      @player_inventory << "bandages"
+    end
+  when "imperial_scout"
+    if chance > 5 && !@player_inventory.include?("spear")
+      puts "You found an Imperial Spear!"
+      @player_inventory << "spear"
+    end
+  when "mercenary"
+    if chance > 3
+      roll = rand(1..3)
+      if roll == 1 && !@player_inventory.include?("Iron Helmet")
+        puts "You found an iron helmet!"
+        @player_inventory << "Iron Helmet"
+      else 
+        roll = rand(2..3)
+      end
+      if roll == 2 && !@player_inventory.include?("Iron Chestplate")
+        puts "You found an iron chestplate!"
+        @player_inventory << "Iron Chestplate"
+      else
+        roll = 3
+      end
+      if roll == 3 && !@player_inventory.include?("Iron Leggings")
+        puts "You found iron leggings!"
+        @player_inventory << "Iron Leggings"
+      end
+      if @player_inventory.include?("Iron Helmet", "Iron Chestplate", "Iron Leggings")
+        puts "Nothing worth taking."
+      end
+    end
+  end
+end
+
+def gain_experience(xp)
+  @experience += xp
+  puts "You gained #{xp} experience points!"
+  
+  if @experience >= @level * 10
+    level_up
+  end
+end
+
+def level_up
+  @level += 1
+  @health += 3
+  @experience = 0
+  puts "You leveled up! You are now level #{@level}!"
+  puts "Your health increased to #{@health}!"
+end
+
+def describe_room
+  case @current_room
+  when :battlefield
+    puts "\nDay #{@day}, #{@time.capitalize}:  \nA horrendous sight."
+    sleep 1.2
+    puts "You start to wonder if it was all really worth it in the end."
+    sleep 3
+    puts "A mercenary is staring at you from the ground."
+    sleep 1
+    puts "And another."
+    sleep 1
+    puts "And another."
+    sleep 2
+    puts "You hold your head high." 
+    sleep 1
+   
+  when :boulder_site
+    puts "\n"
+    puts "The massive meteor-like boulder dominates the landscape. The boulder, charred and bloody, bears properties of both metal and stone."
+    puts "The colossal stone dwarfed the corpses half-buried under the boulder, causing you to miss them at first glance."  
+  end
+end
+
+def move_to(direction)
+  case [@current_room, direction] 
+  when [:battlefield, "toward fighting"], [:battlefield, "fighting"], [:battlefield, "toward"]
+    if @game_state[:hearing_fighting_battlefield]
+    puts "You move toward the sounds of clashing steel..."
+    initiate_combat("stragglers")
+    else
+      "You seem to be a bit out of it."
+    end
+  
+  when [:battlefield, "northeast"], [:battlefield, "ne"], [:battlefield, "boulder"]
+    if @game_state[:boulder_event] && !@game_state[:found_parents]
+      @current_room = :boulder_site
+      puts "You move towards the massive boulder"
+    else
+      puts "You don't see anything interesting in that direction."
+    end
+  
+  when [:boulder_site, "return"], [:boulder_site, "back"], [:boulder_site, "battlefield"]
+    @current_room = :battlefield
+    puts "You return to the main battlefield."
+  else
+    puts "You can't go that way."
+  end
+end
+
+def take_item(item)
+  case [@current_room, item]
+  when [:battlefield, 'sword']
+    if !@player_inventory.include?('sword')
+      @player_inventory << 'sword'
+      puts "You take the sword."
+    else
+      puts "You already have a sword."
+    end
+  when [:battlefield, 'spear']
+    if !@player_inventory.include?('spear')
+      @player_inventory << 'spear'
+      puts "You take the spear."
+    else
+      puts "You already have a spear."
+    end
+  when [:boulder_site, 'pendant']
+    if @game_state[:found_parents] && !@player_inventory.include?('pendant')
+      @player_inventory << 'pendant'
+      puts "You take your family pendant from your parents' remains."
+      puts "#{colorize('Robbert', :blue)} watches silently, his face grim with determination."
+    else
+      puts "I don't see that here."
+    end
+  else
+    puts "I don't see that here."
+  end
+end
+
+def current_weapon
+  if @player_inventory.include?("spear") && @equipped_weapon == "spear"
+    {name: "spear", damage: 10}
+  elsif @player_inventory.include?("sword") && (@equipped_weapon == "sword" || @equipped_weapon.nil?)
+    {name: "sword", damage: 8}
+  else
+    {name: "fists", damage: 3}
+  end
+end
+
+def show_inventory
+  if @player_inventory.empty?
+    puts "Your inventory is empty."
+  else
+    puts "You are carrying:"
+    @player_inventory.each { |item| puts "- #{item}" }
+  end
+end
+
+def equip(item)
+  weapons = ['spear', 'sword', 'fist']
+  armor = ['Iron Helmet', 'Iron Chestplate', 'Iron Leggings']
+  if @player_inventory.include?(item) && weapons.include?(item)
+    puts "You equip the #{item}."
+    @equipped_weapon = item
+  elsif @player_inventory.include?(item) && armor.include?(item)
+    puts "You equip the #{item}."
+    if item == 'Iron Helmet' && @game_state[:equipped_helmet] == false
+      @game_state[:equipped_helmet] = true
+      @health += 3
+    elsif item == 'Iron Chestplate' && @game_state[:equipped_chestplate] == false
+      @game_state[:equipped_chestplate] = true
+      @health += 5
+    elsif item == 'Iron Leggings' && @game_state[:equipped_leggings] == false
+      @game_state[:equipped_leggings] = true
+      @health += 4
+    end
+  elsif item == "fist"
+    puts "#{colorize('You throw your weapon to the ground, now armed and dangerous.', :green)}"
+  else
+    puts "You can't equip that."
+  end
+end
+
+def unequip(item)
+  weapons = ['spear', 'sword', 'fist']
+  armor = ['Iron Helmet', 'Iron Chestplate', 'Iron Leggings']
+  if @player_inventory.include?(item) && weapons.include?(item)
+    puts "You unequip the #{item}."
+    @equipped_weapon = 'fist'
+  elsif @player_inventory.include?(item) && armor.include?(item)
+    puts "You unequip the #{item}."
+    if item == 'Iron Helmet' && @game_state[:equipped_helmet] == true
+      @game_state[:equipped_helmet] = false
+      @health -= 3
+    elsif item == 'Iron Chestplate' && @game_state[:equipped_chestplate] == true
+      @game_state[:equipped_chestplate] = false
+      @health -= 5
+    elsif item == 'Iron Leggings' && @game_state[:equipped_leggings] == true
+      @game_state[:equipped_leggings] = false
+      @health -= 4
+    end
+  end
+end
+
+def use_item(item)
+  if @player_inventory.include?(item)
+    case item
+    when 'sword'
+      puts "You take a stance, imagining an enemy. The only thing they fear is you."
+    when 'spear'
+      puts "A finely crafted spear glimmers even in the darkest depths."
+    when 'bandages'
+      heal_amount = rand(3..5)
+      @health += heal_amount
+      @player_inventory.delete('bandages')
+      puts "You use the bandages to heal #{heal_amount} health. Your health is now #{@health}."
+    else
+      puts "You use the #{item}, but nothing happens."
+    end
+  else
+    puts "You don't have that item."
+  end
+end
+
+
+
