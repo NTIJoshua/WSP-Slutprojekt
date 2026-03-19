@@ -1,0 +1,16 @@
+main.game-page 
+    section.terminal-window
+        .terminal-topbar
+            .terminal-dot 
+            .terminal-dot 
+            .terminal-dot 
+            span Brutus.exe
+
+        .terminal-body
+            p Type "help" for a list of commands.
+            p inventories, dialogue, combat texts, and system messages will appear here.
+
+        form.command-form method="post" action="/command"
+            label.sr-only for="command" Command 
+            span.prompt PS C:\Brutus>
+            input#command type="text" name="command" autocomplete="off" autofocus="true"

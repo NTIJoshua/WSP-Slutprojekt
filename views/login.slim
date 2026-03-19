@@ -2,10 +2,13 @@ h2 Log in
 - if @error
   p= @error
 form method="post" action="/login"
-  label Username
+  label Username 
+  br
   input type="text" name="user"
-  label Password
+  br
+  label Password 
+  br
   input type="password" name="pwd"
+  br
   button type="submit" Log in
-p
-  a href="/register" Register
+

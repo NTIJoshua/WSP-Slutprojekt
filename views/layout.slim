@@ -8,7 +8,16 @@ html lang="en"
   header 
   h1 Brutus    
   nav
-    <a href='/'>Home</a> 
-    <a href='/login'>Login</a>
+    <a href='/'>Home</a>
+    - if session[:user_id]
+      a href='/logout' Logout
+    - else
+      a href='/login' Login
+      a href='/register' Register
+
+    -if session[:user_id]
+      p.right Logged in as: #{session[:username]} 
+      form method="post" action="/delete_account"
+        button type="submit" onclick="return confirm('Delete your account and all saved data?')" Delete Account
   body 
     ==yield

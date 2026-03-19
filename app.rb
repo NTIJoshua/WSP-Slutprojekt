@@ -6,74 +6,117 @@ require 'bcrypt'
 
 
 
-enable :session
+enable :sessions
+set :session_secret, "super duper ultra uber secret string2568576456357468507685746356745879680985473678596070968574352647586970765436789076854374267135137589135670823+521350+362487646252463057834057+362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645"
+
+post('/delete_account') do
+  redirect('/login') if session[:user_id].nil?
+
+  db = SQLite3::Database.new("db/brutus.db")
+  db.results_as_hash = true
+  db.execute('PRAGMA foreign_keys = ON')
+
+  user_id = session[:user_id]
+
+  character_ids = db.execute("SELECT character_id FROM user_characters WHERE user_id=?", [user_id])
+
+  character_ids.each do |row|
+    db.execute("DELETE FROM characters WHERE id=?", [row['character_id']])
+  end
+
+  db.execute("DELETE FROM users WHERE id=?", session[:user_id])
+  session.clear
+  redirect('/login')
+end
+
 
 post('/register') do
-    user = params["user"]
-    pwd = params["pwd"]
-    pwd_confirm = params["pwd_confirm"]
-    
-    db = SQLite3::Database.new("db/brutus.db")
-    result = db.execute("SELECT id FROM users WHERE name=?",user)
+  user = params["user"]
+  pwd = params["pwd"]
+  pwd_confirm = params["pwd_confirm"]
+  
+  db = SQLite3::Database.new("db/brutus.db")
+  result = db.execute("SELECT id FROM users WHERE name=?",user)
 
-    if result.empty?
-        if pwd == pwd_confirm
-            pwd_digest = BCrypt::Password.create(pwd)
-            db.execute("INSERT INTO users(name, pwd_digest) VALUES(?,?)", [user, pwd_digest])
-            redirect('/')
-        else
-            redirect('/register')
-        end
+  if result.empty?
+    if pwd == pwd_confirm
+      pwd_digest = BCrypt::Password.create(pwd)
+      db.execute("INSERT INTO users(name, pwd_digest) VALUES(?,?)", [user, pwd_digest])
+
+      user_id = db.last_insert_row_id
+      session[:user_id] = user_id
+      session[:username] = user
+
+      redirect('/')
     else
-        redirect('/register')
+      redirect('/register?error=Passwords%20do%20not%20match')
     end
+
+  else
+    redirect('/register?error=User%20already%20exists')
+  end
 
 end
 
 get('/') do
-    if session[:user_id] == nil
-        redirect('/login')
-    end
-    id = params[:id].to_i
-    db = SQLite3::Database.new("db/brutus.db")
-    result = db.execute("SELECT * FROM users WHERE name=?",user)
-    slim(:home)
+  redirect('/login') if session[:user_id].nil?
+
+
+  db = SQLite3::Database.new("db/brutus.db")
+  db.results_as_hash = true
+  @user = db.execute("SELECT * FROM users WHERE id=?", session[:user_id]).first
+
+  redirect('/login') if @user.nil?
+  slim(:home)
 end
 
 
 
 get('/register') do
-    session.clear
-    slim(:register)
+  @error = params[:error]
+  session.clear
+  slim(:register)
 end
 
+
+
 get('/login') do
-    session.clear
+  @error = params[:error]
+  slim(:login)
+end
+
+get('/logout') do
+  session.clear
+  redirect('/login')
+end
+
+get('/error') do
+    @error = session.delete(:error) || "An error occurred."
     slim(:login)
 end
 
 post('/login') do
-    user = params["user"]
-    pwd = params["pwd"]
+  user = params["user"]
+  pwd = params["pwd"]
 
-    db = SQLite3::Database.new("db/brutus.db")
-    db.results_as_hash = true
-    result = db.execute("SELECT id, pwd_digest FROM users WHERE name=?",user)
+  db = SQLite3::Database.new("db/brutus.db")
+  db.results_as_hash = true
+  result = db.execute("SELECT id, pwd_digest FROM users WHERE name=?",user)
 
-    if result.empty?
-        redirect('/error')
-    end
+  if result.empty?
+    redirect('/login?error=User%20does%20not%20exist')
+  end
 
-    user_id = result.first["id"]
-    pwd_digest = result.first["pwd_digest"]
+  user_id = result.first["id"]
+  pwd_digest = result.first["pwd_digest"]
 
-    if BCrypt::Password.new(pwd_digest) == pwd
-        session[:user_id] = user_id
-        redirect('/')
-    else
-        redirect('/error')
-    end
-
+  if BCrypt::Password.new(pwd_digest) == pwd
+    session[:user_id] = user_id
+    session[:username] = user
+    redirect('/')
+  else
+    redirect('/login?error=Incorrect%20password')
+  end
 end
 
 
@@ -88,7 +131,7 @@ COLORS = {
   reset: "\e[0m"
 }
 
-def initialize
+def game_initialize
   @game_over = false
   @current_room = :battlefield
   @player_inventory = []
