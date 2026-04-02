@@ -3,7 +3,9 @@ require 'sqlite3'
 require 'slim'
 require 'sinatra/reloader'
 require 'bcrypt'
+require 'stringio'
 
+DB_PATH = File.expand_path('db/brutus.db', __dir__)
 
 
 enable :sessions
@@ -12,7 +14,7 @@ set :session_secret, "super duper ultra uber secret string2568576456357468507685
 post('/delete_account') do
   redirect('/login') if session[:user_id].nil?
 
-  db = SQLite3::Database.new("db/brutus.db")
+  db = SQLite3::Database.new(DB_PATH)
   db.results_as_hash = true
   db.execute('PRAGMA foreign_keys = ON')
 
@@ -29,13 +31,12 @@ post('/delete_account') do
   redirect('/login')
 end
 
-
 post('/register') do
   user = params["user"]
   pwd = params["pwd"]
   pwd_confirm = params["pwd_confirm"]
   
-  db = SQLite3::Database.new("db/brutus.db")
+  db = SQLite3::Database.new(DB_PATH)
   result = db.execute("SELECT id FROM users WHERE name=?",user)
 
   if result.empty?
@@ -61,24 +62,25 @@ end
 get('/') do
   redirect('/login') if session[:user_id].nil?
 
-
-  db = SQLite3::Database.new("db/brutus.db")
-  db.results_as_hash = true
-  @user = db.execute("SELECT * FROM users WHERE id=?", session[:user_id]).first
-
+  ensure_terminal
+  @user = db.execute("SELECT * FROM users WHERE id=?", [session[:user_id]]).first
   redirect('/login') if @user.nil?
+
+  unless session[:terminal_booted]
+    push_line("Welcome, #{session[:username]}.")
+    print_character_menu
+    session[:terminal_booted] = true
+  end
+
+  @terminal_output = session[:terminal_output]
   slim(:home)
 end
-
-
 
 get('/register') do
   @error = params[:error]
   session.clear
   slim(:register)
 end
-
-
 
 get('/login') do
   @error = params[:error]
@@ -99,7 +101,7 @@ post('/login') do
   user = params["user"]
   pwd = params["pwd"]
 
-  db = SQLite3::Database.new("db/brutus.db")
+  db = SQLite3::Database.new(DB_PATH)
   db.results_as_hash = true
   result = db.execute("SELECT id, pwd_digest FROM users WHERE name=?",user)
 
@@ -119,7 +121,305 @@ post('/login') do
   end
 end
 
+def introduction_dialogue_web_intro_only
+  puts "#{player_name}: Who are you?"
+  puts "???: Who am I? The name's Robbert, a mercenary, nice to meet'cha."
+  puts "Robbert: By the way, how'd you get in this mess? How old are you even?"
+  puts "How do you respond?"
+  puts "Type: intro 1   (full truth)"
+  puts "Type: intro 2   (lie about age)"
+  puts "Type: intro 3   (stay silent)"
+end
 
+def apply_intro_choice(choice)
+  case choice
+  when "1"
+    puts "#{player_name}: I'm twelve. Both of my parents went missing some days ago."
+    @game_state[:robbert_trust] += 2
+  when "2"
+    puts "#{player_name}: I'm... sixteen. I got separated from my unit."
+    @game_state[:robbert_trust] -= 1
+    puts "Robbert: ...My condolences."
+  else
+    puts "#{player_name}: ..."
+    puts "Robbert: Tough kid, eh? Alright then."
+  end
+  @game_state[:knows_about_invasion] = true
+  describe_room_no_sleep
+end
+
+def describe_room_no_sleep
+  case @current_room
+  when :battlefield
+    puts "Day #{@day}, #{@time.capitalize}: A horrendous sight."
+    puts "You hold your head high."
+  when :boulder_site
+    puts "The massive meteor-like boulder dominates the landscape."
+  end
+end
+
+post('/command') do
+  redirect('/login') if session[:user_id].nil?
+  ensure_terminal
+
+  input = params[:command].to_s.strip
+  push_line("PS C:\\Brutus> #{input}")
+  command, *params_arr = input.downcase.split(/\s+/)
+
+  if session[:ui_state] == 'intro_choice'
+    load_game_state
+    if command == 'intro' && params_arr.first
+      out = capture_output { apply_intro_choice(params_arr.first) }
+      append_captured_output(out)
+      session[:ui_state] = 'game'
+      session[:game] = snapshot_game_state
+    else
+      push_line("Choose intro response with: intro 1, intro 2, or intro 3")
+    end
+    return redirect('/')
+  end
+
+  database = db
+
+  if session[:ui_state] == 'character_create'
+    name = input.strip
+    if name.length < 3 || name.length > 20 || name.include?(" ")
+      push_line("Invalid name. Use 3-20 chars, no spaces.")
+    else
+      database.execute("INSERT INTO characters(name, description) VALUES (?, ?)", [name, ""])
+      character_id = database.last_insert_row_id
+      database.execute("INSERT INTO user_characters(user_id, character_id) VALUES (?, ?)", [session[:user_id], character_id])
+      db.execute("INSERT INTO character_stats(character_id, level, xp, hp, max_hp, attack, defense, gold) VALUES (?, 1, 0, 10, 10, 3, 0, 0)", [character_id])
+
+      session[:character_id] = character_id
+      session[:ui_state] = 'game'
+      session.delete(:game)
+
+      game_initialize
+      @playername = name
+      session[:game] = snapshot_game_state
+
+      push_line("Character '#{name}' created and selected.")
+      push_line('Type "help" for commands.')
+      session[:ui_state] = 'intro_choice'
+      intro_out = capture_output { introduction_dialogue_web_intro_only }
+      append_captured_output(intro_out)
+    end
+    redirect('/')
+  end
+
+  if session[:character_id].nil?
+    case command
+    when 'help'
+      push_line("Character commands: list, create, select <id>, delete <id>")
+    when 'list'
+      print_character_menu
+    when 'create'
+      session[:ui_state] = 'character_create'
+      push_line("Enter your new character name:")
+    when 'select'
+      char_id = params_arr.first.to_i
+      owned = db.execute("SELECT 1 FROM user_characters WHERE user_id=? AND character_id=?", [session[:user_id], char_id]).any?
+      if owned
+        character = db.execute("SELECT * FROM characters WHERE id=?", [char_id]).first
+        session[:character_id] = char_id
+        session[:ui_state] = 'game'
+        session.delete(:game)
+
+        game_initialize
+        @playername = character["name"]
+        session[:game] = snapshot_game_state
+
+        push_line("Selected '#{@playername}'.")
+        push_line('Type "help" for commands.')
+        describe_out = capture_output { describe_room }
+        append_captured_output(describe_out)
+      else
+        push_line("Invalid character id.")
+      end
+    when 'delete'
+      char_id = params_arr.first.to_i
+      owned = db.execute("SELECT 1 FROM user_characters WHERE user_id=? AND character_id=?", [session[:user_id], char_id]).any?
+      if owned
+        db.execute("DELETE FROM characters WHERE id=?", [char_id])
+        push_line("Character deleted.")
+      else
+        push_line("Invalid character id.")
+      end
+    else
+      push_line("Pick a character first. Type 'list' or 'create'.")
+    end
+
+    return redirect('/')
+  end
+
+  # Game mode
+  load_game_state
+
+  game_out = capture_output do
+    case command
+    when 'look' then describe_room
+    when 'go', 'move' then move_to(params_arr.join(' '))
+    when 'take', 'get' then take_item(params_arr.join(' '))
+    when 'use' then use_item(params_arr.join(' '))
+    when 'equip' then equip(params_arr.join(' '))
+    when 'unequip' then unequip(params_arr.join(' '))
+    when 'inventory', 'items' then show_inventory
+    when 'stats' then show_stats
+    when 'help' then show_help
+    when 'characters'
+      session[:character_id] = nil
+      session[:ui_state] = 'character_menu'
+      puts "Returned to character menu."
+      print_character_menu
+    else
+      puts "I don't understand that command."
+    end
+  end
+
+  append_captured_output(game_out)
+  session[:game] = snapshot_game_state
+
+  # save basic stats to DB now
+  db.execute("UPDATE character_stats SET level=?, xp=?, hp=?, max_hp=? WHERE character_id=?",
+             [@level, @experience, @health, [@health, 10].max, session[:character_id]])
+
+  redirect('/')
+end
+
+def web_sleep(seconds)
+  puts "__SLEEP__:#{seconds}"
+end
+
+def push_line(text, delay_ms: 0)
+  session[:terminal_output] ||= []
+  show_at = (Time.now.to_f * 1000).to_i + delay_ms
+  session[:terminal_output] << { "text" => text.to_s, "show_at" => show_at }
+  session[:terminal_output] = session[:terminal_output].last(300)
+end
+
+def append_captured_output(output)
+  delay_ms = 0
+
+  output.to_s.each_line do |raw|
+    line = raw.chomp
+    next if line.strip.empty?
+
+    if line.start_with?("__SLEEP__:")
+      seconds = line.split(":", 2).last.to_f
+      delay_ms += (seconds * 1000).to_i
+    else
+      push_line(line, delay_ms: delay_ms)
+    end
+  end
+end
+
+helpers do
+  def db
+    @db ||= begin
+      database = SQLite3::Database.new(DB_PATH)
+      database.results_as_hash = true
+      database.execute("PRAGMA foreign_keys = ON")
+      database
+    end
+  end
+
+  def current_character
+    return nil if session[:character_id].nil?
+    db.execute("SELECT * FROM characters WHERE id = ?", [session[:character_id]]).first
+  end
+
+  def player_name
+    @playername.to_s.empty? ? "Unknown" : @playername
+  end
+
+  def ensure_terminal
+    session[:terminal_output] ||= []
+    session[:ui_state] ||= 'character_menu'
+    session[:terminal_booted] ||= false
+  end
+
+
+  def capture_output
+    old_stdout = $stdout
+    buffer = StringIO.new
+    $stdout = buffer
+    yield
+    buffer.string
+    ensure
+    $stdout = old_stdout
+  end
+
+  def characters_for_user(user_id)
+    db.execute(<<~SQL, [user_id])
+      SELECT c.id, c.name, c.created_at
+      FROM characters c
+      INNER JOIN user_characters uc ON uc.character_id = c.id
+      WHERE uc.user_id = ?
+      ORDER BY c.created_at DESC
+    SQL
+  end
+
+  def print_character_menu
+    chars = characters_for_user(session[:user_id])
+
+    if chars.empty?
+      push_line("No characters found.")
+      push_line("Create a character.")
+    else
+      chars.each { |c| push_line("[#{c['id']}] #{c['name']}") }
+      push_line("Type: select <id>")
+      push_line("Type: create")
+      push_line("Type: delete <id>")
+    end
+    push_line("Type 'help' for a list of commands.")
+  end
+
+  def snapshot_game_state
+    {
+      'game_over' => @game_over,
+      'current_room' => @current_room.to_s,
+      'player_inventory' => @player_inventory,
+      'game_state' => @game_state,
+      'level' => @level,
+      'experience' => @experience,
+      'playername' => @playername,
+      'health' => @health,
+      'time' => @time,
+      'day' => @day,
+      'thehour' => @thehour,
+      'theminute' => @theminute,
+      'equipped_weapon' => @equipped_weapon,
+      'enemies' => @enemies
+    }
+  end
+
+  def load_game_state
+    g = session[:game] || {}
+    @game_over = g['game_over']
+    @current_room = (g['current_room'] || 'battlefield').to_sym
+    @player_inventory = g['player_inventory'] || []
+    @game_state = g['game_state'] || {}
+    @level = g['level'] || 1
+    @experience = g['experience'] || 0
+    @playername = g['playername'] || ""
+    @health = g['health'] || 10
+    @time = g['time'] || 'afternoon'
+    @day = g['day'] || 1
+    @thehour = g['thehour'] || 13
+    @theminute = g['theminute'] || 10
+    @equipped_weapon = g['equipped_weapon']
+    @enemies = g['enemies'] || {
+      "stragglers" => { hp: 15, damage: 3, xp: 10 },
+      "imperialscout" => { hp: 20, damage: 5, xp: 15 },
+      "mercenary" => { hp: 25, damage: 6, xp: 20 }
+    }
+  end
+
+  def colorize(text, _color)
+      text
+  end
+end
 
 COLORS = {
   red: "\e[31m",
@@ -174,16 +474,16 @@ end
 
 def character_creation
   system('cls')
-  sleep 1
+  web_sleep(1)
   puts "???: What's your name, kid?"
-  sleep 1
+  web_sleep(1)
   puts "#{colorize('He stretches out his war-torn hand.', :green)}"
   @playername = gets.chomp
-  sleep 1
+  web_sleep(1)
   puts "#{colorize('*You grab his hand and pull yourself up*', :green)}"
-  sleep 2
+  web_sleep(2)
   puts "You: My name is #{player_name}."
-  sleep 2
+  web_sleep(2)
   if @playername.length > 10
     puts "???: What?? That's too long!\n???: At least give me a nickname I can use!"
     @playername = gets.chomp
@@ -288,7 +588,7 @@ def game_loop
 end
 
 def introduction_dialogue
-  sleep 4
+  web_sleep(4)
   if @playername[0]&.upcase == "G"
     puts "#{player_name}: ...Who are you?"
   else
@@ -296,9 +596,9 @@ def introduction_dialogue
   end
 
   puts "\n???: Who am I? The name's #{colorize('Robbert', :blue)}, a mercenary, nice to meet'cha."
-  sleep 4
+  web_sleep(4)
   puts "#{colorize('Robbert', :blue)}: By the way, how'd you get in this mess? How old are you even?"
-  sleep 4
+  web_sleep(4)
   
   # Player's response options
   puts "\nHow do you respond?"
@@ -312,23 +612,23 @@ def introduction_dialogue
   when 1
     puts "#{player_name}: I'm twelve. Both of my parents went missing some days ago."
     @game_state[:robbert_trust] += 2
-    sleep 4
+    web_sleep(4)
   when 2
     puts "#{player_name}: I'm... sixteen. I got separated from my unit."
     @game_state[:robbert_trust] -= 1
-    sleep 3
+    web_sleep(3)
     puts "#{colorize('Robbert', :blue)}: ...My condolences. Then again, you're probably not the only one."
-    sleep 3
+    web_sleep(3)
     puts "#{colorize('Robbert', :blue)}: Wouldn't surprise me if the churches were working their asses off right now."
-    sleep 3
+    web_sleep(3)
   else
     puts "#{player_name}: ..."
     puts "#{colorize('Robbert', :blue)}: Tough kid, eh? Alright then."
-    sleep 3
+    web_sleep(3)
   end
   puts "#{colorize('*You take a look around*', :green)}"
   @game_state[:knows_about_invasion] = true
-  sleep 4
+  web_sleep(4)
   describe_room
 end
 
@@ -489,17 +789,17 @@ def describe_room
   case @current_room
   when :battlefield
     puts "\nDay #{@day}, #{@time.capitalize}:  \nA horrendous sight."
-    sleep 1.2
+    web_sleep(1.2)
     puts "You start to wonder if it was all really worth it in the end."
-    sleep 3
+    web_sleep(3)
     puts "A mercenary is staring at you from the ground."
-    sleep 1
+    web_sleep(1)
     puts "And another."
-    sleep 1
+    web_sleep(1)
     puts "And another."
-    sleep 2
+    web_sleep(2)
     puts "You hold your head high." 
-    sleep 1
+    web_sleep(1)
    
   when :boulder_site
     puts "\n"

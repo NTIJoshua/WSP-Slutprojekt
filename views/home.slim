@@ -6,11 +6,16 @@ main.game-page
             .terminal-dot 
             span Brutus.exe
 
-        .terminal-body
-            p Type "help" for a list of commands.
-            p inventories, dialogue, combat texts, and system messages will appear here.
+        .terminal-body#terminal-body
+            - if @terminal_output && !@terminal_output.empty?
+                - @terminal_output.each do |entry|
+                    p.terminal-line data-show-at=entry["show_at"] = entry["text"]
+            - else
+                p Type "help" for a list of commands.
+
+
 
         form.command-form method="post" action="/command"
             label.sr-only for="command" Command 
             span.prompt PS C:\Brutus>
-            input#command type="text" name="command" autocomplete="off" autofocus="true"
+            input#command type="text" name="command" autocomplete="true" autofocus="true"
