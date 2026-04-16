@@ -4,66 +4,62 @@ require 'slim'
 require 'sinatra/reloader'
 require 'bcrypt'
 require 'stringio'
+require_relative 'model/model.rb'
 
+# @return [String]
 DB_PATH = File.expand_path('db/brutus.db', __dir__)
 
+# @return [Model]
+MODEL = Model.new(DB_PATH)
 
 enable :sessions
+
+
+
 set :session_secret, "super duper ultra uber secret string2568576456357468507685746356745879680985473678596070968574352647586970765436789076854374267135137589135670823+521350+362487646252463057834057+362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645362487645"
 
 post('/delete_account') do
   redirect('/login') if session[:user_id].nil?
 
-  db = SQLite3::Database.new(DB_PATH)
-  db.results_as_hash = true
-  db.execute('PRAGMA foreign_keys = ON')
-
   user_id = session[:user_id]
-
-  character_ids = db.execute("SELECT character_id FROM user_characters WHERE user_id=?", [user_id])
-
-  character_ids.each do |row|
-    db.execute("DELETE FROM characters WHERE id=?", [row['character_id']])
+  MODEL.characters_for_user(user_id).each do |character|
+    MODEL.delete_character(character["id"])
   end
+  MODEL.delete_user(user_id)
 
-  db.execute("DELETE FROM users WHERE id=?", session[:user_id])
   session.clear
   redirect('/login')
 end
+
 
 post('/register') do
   user = params["user"]
   pwd = params["pwd"]
   pwd_confirm = params["pwd_confirm"]
-  
-  db = SQLite3::Database.new(DB_PATH)
-  result = db.execute("SELECT id FROM users WHERE name=?",user)
 
-  if result.empty?
+  existing_user = MODEL.find_user_by_name(user)
+
+  if existing_user.nil?
     if pwd == pwd_confirm
       pwd_digest = BCrypt::Password.create(pwd)
-      db.execute("INSERT INTO users(name, pwd_digest) VALUES(?,?)", [user, pwd_digest])
-
-      user_id = db.last_insert_row_id
+      user_id = MODEL.create_user(user, pwd_digest)
       session[:user_id] = user_id
       session[:username] = user
-
       redirect('/')
     else
       redirect('/register?error=Passwords%20do%20not%20match')
     end
-
   else
     redirect('/register?error=User%20already%20exists')
   end
-
 end
+
 
 get('/') do
   redirect('/login') if session[:user_id].nil?
 
   ensure_terminal
-  @user = db.execute("SELECT * FROM users WHERE id=?", [session[:user_id]]).first
+  @user = MODEL.find_user_by_id(session[:user_id])
   redirect('/login') if @user.nil?
 
   unless session[:terminal_booted]
@@ -101,36 +97,48 @@ post('/login') do
   user = params["user"]
   pwd = params["pwd"]
 
-  db = SQLite3::Database.new(DB_PATH)
-  db.results_as_hash = true
-  result = db.execute("SELECT id, pwd_digest FROM users WHERE name=?",user)
+  result = MODEL.find_user_by_name(user)
+  redirect('/login?error=User%20does%20not%20exist') if result.nil?
 
-  if result.empty?
-    redirect('/login?error=User%20does%20not%20exist')
+  if MODEL.locked_out?(result)
+    seconds_left = MODEL.lockout_seconds_left(result)
+    redirect("/login?error=Too%20many%20attempts.%20Try%20again%20in%20#{seconds_left}%20seconds")
   end
 
-  user_id = result.first["id"]
-  pwd_digest = result.first["pwd_digest"]
+  user_id = result["id"]
+  pwd_digest = result["pwd_digest"]
 
   if BCrypt::Password.new(pwd_digest) == pwd
+    MODEL.clear_login_failures(user_id)
     session[:user_id] = user_id
     session[:username] = user
+    session[:is_admin] = (result["is_admin"].to_i == 1)
     redirect('/')
   else
-    redirect('/login?error=Incorrect%20password')
+    lock_seconds = MODEL.register_failed_login(result, max_attempts: 5, cooldown_seconds: 60)
+
+    if lock_seconds > 0
+      redirect("/login?error=Too%20many%20attempts.%20Locked%20for%20#{lock_seconds}%20seconds")
+    else
+      redirect('/login?error=Incorrect%20password')
+    end
   end
 end
 
+
+# @return [void]
 def introduction_dialogue_web_intro_only
   puts "#{player_name}: Who are you?"
   puts "???: Who am I? The name's Robbert, a mercenary, nice to meet'cha."
   puts "Robbert: By the way, how'd you get in this mess? How old are you even?"
   puts "How do you respond?"
-  puts "Type: intro 1   (full truth)"
-  puts "Type: intro 2   (lie about age)"
-  puts "Type: intro 3   (stay silent)"
+  puts "1   (full truth)"
+  puts "2   (lie about age)"
+  puts "3   (stay silent)"
 end
 
+# @param choice [String] intro choice input
+# @return [void]
 def apply_intro_choice(choice)
   case choice
   when "1"
@@ -148,6 +156,7 @@ def apply_intro_choice(choice)
   describe_room_no_sleep
 end
 
+# @return [void]
 def describe_room_no_sleep
   case @current_room
   when :battlefield
@@ -166,31 +175,72 @@ post('/command') do
   push_line("PS C:\\Brutus> #{input}")
   command, *params_arr = input.downcase.split(/\s+/)
 
-  if session[:ui_state] == 'intro_choice'
-    load_game_state
-    if command == 'intro' && params_arr.first
-      out = capture_output { apply_intro_choice(params_arr.first) }
-      append_captured_output(out)
-      session[:ui_state] = 'game'
-      session[:game] = snapshot_game_state
-    else
-      push_line("Choose intro response with: intro 1, intro 2, or intro 3")
-    end
+  if command == "clear"
+    session[:terminal_output] = []
     return redirect('/')
   end
 
-  database = db
+
+  if session[:is_admin]
+    if command == "admin_users"
+      MODEL.all_users.each do |u|
+        role = u["is_admin"].to_i == 1 ? "admin" : "user"
+        push_line("[#{u["id"]}] #{u["name"]} (#{role})")
+      end
+      return redirect('/')
+    end
+
+    if command == "admin_delete"
+      target_id = params_arr.first.to_i
+      if target_id <= 0
+        push_line("Usage: admin_delete <user_id>")
+        return redirect('/')
+      end
+
+      if target_id == session[:user_id]
+        push_line("You cannot delete your own account while logged in.")
+        return redirect('/')
+      end
+
+      target = MODEL.find_user_by_id(target_id)
+      if target.nil?
+        push_line("User not found.")
+        return redirect('/')
+      end
+
+      if target["is_admin"].to_i == 1
+        push_line("Cannot delete another admin.")
+        return redirect('/')
+      end
+
+      MODEL.delete_user_with_characters(target_id)
+      push_line("User #{target["name"]} deleted.")
+      return redirect('/')
+    end
+  end
+
+
+  if session[:ui_state] == 'intro_choice'
+    load_game_state
+    choice = input.strip
+
+    if choice == "1" || choice == "2"
+      out = capture_output { apply_intro_choice(choice) }
+    else
+      out = capture_output { apply_intro_choice("3") }
+    end
+      append_captured_output(out)
+    session[:ui_state] = 'game'
+    session[:game] = snapshot_game_state
+    return redirect('/')
+  end
 
   if session[:ui_state] == 'character_create'
     name = input.strip
     if name.length < 3 || name.length > 20 || name.include?(" ")
       push_line("Invalid name. Use 3-20 chars, no spaces.")
     else
-      database.execute("INSERT INTO characters(name, description) VALUES (?, ?)", [name, ""])
-      character_id = database.last_insert_row_id
-      database.execute("INSERT INTO user_characters(user_id, character_id) VALUES (?, ?)", [session[:user_id], character_id])
-      db.execute("INSERT INTO character_stats(character_id, level, xp, hp, max_hp, attack, defense, gold) VALUES (?, 1, 0, 10, 10, 3, 0, 0)", [character_id])
-
+      character_id = MODEL.create_character_for_user(session[:user_id], name)
       session[:character_id] = character_id
       session[:ui_state] = 'game'
       session.delete(:game)
@@ -219,9 +269,9 @@ post('/command') do
       push_line("Enter your new character name:")
     when 'select'
       char_id = params_arr.first.to_i
-      owned = db.execute("SELECT 1 FROM user_characters WHERE user_id=? AND character_id=?", [session[:user_id], char_id]).any?
+      owned = MODEL.user_owns_character?(session[:user_id], char_id)
       if owned
-        character = db.execute("SELECT * FROM characters WHERE id=?", [char_id]).first
+        character = MODEL.find_character(char_id)
         session[:character_id] = char_id
         session[:ui_state] = 'game'
         session.delete(:game)
@@ -239,9 +289,9 @@ post('/command') do
       end
     when 'delete'
       char_id = params_arr.first.to_i
-      owned = db.execute("SELECT 1 FROM user_characters WHERE user_id=? AND character_id=?", [session[:user_id], char_id]).any?
+      owned = MODEL.user_owns_character?(session[:user_id], char_id)
       if owned
-        db.execute("DELETE FROM characters WHERE id=?", [char_id])
+        MODEL.delete_character(char_id)
         push_line("Character deleted.")
       else
         push_line("Invalid character id.")
@@ -267,6 +317,12 @@ post('/command') do
     when 'inventory', 'items' then show_inventory
     when 'stats' then show_stats
     when 'help' then show_help
+    when 'quit', 'exit'
+      session[:character_id] = nil
+      session[:ui_state] = 'character_menu'
+      session.delete(:game)
+      puts "You leave the adventure."
+      print_character_menu
     when 'characters'
       session[:character_id] = nil
       session[:ui_state] = 'character_menu'
@@ -280,17 +336,25 @@ post('/command') do
   append_captured_output(game_out)
   session[:game] = snapshot_game_state
 
-  # save basic stats to DB now
-  db.execute("UPDATE character_stats SET level=?, xp=?, hp=?, max_hp=? WHERE character_id=?",
-             [@level, @experience, @health, [@health, 10].max, session[:character_id]])
-
+  MODEL.update_character_stats(
+    character_id: session[:character_id],
+    level: @level,
+    xp: @experience,
+    hp: @health,
+    max_hp: [@health, 10].max
+  )
   redirect('/')
 end
 
+# @param seconds [Numeric] delay duration
+# @return [void]
 def web_sleep(seconds)
   puts "__SLEEP__:#{seconds}"
 end
 
+# @param text [String] output line text
+# @param delay_ms [Integer] reveal delay in milliseconds
+# @return [void]
 def push_line(text, delay_ms: 0)
   session[:terminal_output] ||= []
   show_at = (Time.now.to_f * 1000).to_i + delay_ms
@@ -298,6 +362,8 @@ def push_line(text, delay_ms: 0)
   session[:terminal_output] = session[:terminal_output].last(300)
 end
 
+# @param output [String] captured stdout text
+# @return [void]
 def append_captured_output(output)
   delay_ms = 0
 
@@ -315,19 +381,13 @@ def append_captured_output(output)
 end
 
 helpers do
-  def db
-    @db ||= begin
-      database = SQLite3::Database.new(DB_PATH)
-      database.results_as_hash = true
-      database.execute("PRAGMA foreign_keys = ON")
-      database
-    end
-  end
+  
 
   def current_character
     return nil if session[:character_id].nil?
-    db.execute("SELECT * FROM characters WHERE id = ?", [session[:character_id]]).first
+    MODEL.find_character(session[:character_id])
   end
+
 
   def player_name
     @playername.to_s.empty? ? "Unknown" : @playername
@@ -351,14 +411,9 @@ helpers do
   end
 
   def characters_for_user(user_id)
-    db.execute(<<~SQL, [user_id])
-      SELECT c.id, c.name, c.created_at
-      FROM characters c
-      INNER JOIN user_characters uc ON uc.character_id = c.id
-      WHERE uc.user_id = ?
-      ORDER BY c.created_at DESC
-    SQL
+    MODEL.characters_for_user(user_id)
   end
+
 
   def print_character_menu
     chars = characters_for_user(session[:user_id])
@@ -368,9 +423,9 @@ helpers do
       push_line("Create a character.")
     else
       chars.each { |c| push_line("[#{c['id']}] #{c['name']}") }
-      push_line("Type: select <id>")
-      push_line("Type: create")
-      push_line("Type: delete <id>")
+      push_line("select <id>")
+      push_line("create")
+      push_line("delete <id>")
     end
     push_line("Type 'help' for a list of commands.")
   end
@@ -421,6 +476,7 @@ helpers do
   end
 end
 
+# @return [Hash<Symbol, String>]
 COLORS = {
   red: "\e[31m",
   green: "\e[32m",
@@ -431,6 +487,7 @@ COLORS = {
   reset: "\e[0m"
 }
 
+# @return [void]
 def game_initialize
   @game_over = false
   @current_room = :battlefield
@@ -465,6 +522,7 @@ def game_initialize
   }
 end
 
+# @return [void]
 def start
   character_creation
   introduction_dialogue  
@@ -472,6 +530,7 @@ def start
   game_loop
 end
 
+# @return [void]
 def character_creation
   system('cls')
   web_sleep(1)
@@ -524,6 +583,7 @@ def character_creation
   end
 end
 
+# @return [void]
 def game_loop
   until @game_over
     print "> "
@@ -587,6 +647,7 @@ def game_loop
   puts "Thanks for playing, #{player_name}."
 end
 
+# @return [void]
 def introduction_dialogue
   web_sleep(4)
   if @playername[0]&.upcase == "G"
@@ -632,8 +693,10 @@ def introduction_dialogue
   describe_room
 end
 
+# @return [void]
 def show_help
   puts "Available commands:"
+  puts "clear - Clear terminal output"
   puts "look - Describe current location"
   puts "go/move [direction] - Move to new area"
   puts "search - Look for items"
@@ -650,9 +713,15 @@ def show_help
   puts "wait - Pass time"
   puts "stats - Show your status"
   puts "help - Show this menu"
-  puts "quit/exit - End the game"
+  puts "quit/exit - Return to character menu"
+  if session[:is_admin]
+    puts "admin_users - List all users"
+    puts "admin_delete [user_id] - Delete a non-admin user"
+  end
+
 end
 
+# @return [void]
 def show_stats
   puts "#{player_name}, Level #{@level}"
   puts "health: #{@health}"
@@ -660,6 +729,8 @@ def show_stats
   puts "Weapon: #{current_weapon[:name]} (#{current_weapon[:damage]} damage)"
 end
 
+# @param enemy [String] enemy key/name input
+# @return [Boolean, void] false when cancelled/invalid, otherwise nil
 def initiate_combat(enemy)
   nevermind = ["no", "nevermind", "stop", "exit", "quit"]
   
@@ -729,6 +800,8 @@ def initiate_combat(enemy)
   end
 end
 
+# @param enemy [String] defeated enemy key
+# @return [void]
 def loot_chance(enemy)
   chance = rand(1..10)
   case enemy
@@ -768,6 +841,8 @@ def loot_chance(enemy)
   end
 end
 
+# @param xp [Integer] amount of experience gained
+# @return [void]
 def gain_experience(xp)
   @experience += xp
   puts "You gained #{xp} experience points!"
@@ -777,6 +852,7 @@ def gain_experience(xp)
   end
 end
 
+# @return [void]
 def level_up
   @level += 1
   @health += 3
@@ -785,6 +861,7 @@ def level_up
   puts "Your health increased to #{@health}!"
 end
 
+# @return [void]
 def describe_room
   case @current_room
   when :battlefield
@@ -808,6 +885,8 @@ def describe_room
   end
 end
 
+# @param direction [String, nil] parsed direction argument
+# @return [void]
 def move_to(direction)
   case [@current_room, direction] 
   when [:battlefield, "toward fighting"], [:battlefield, "fighting"], [:battlefield, "toward"]
@@ -834,6 +913,8 @@ def move_to(direction)
   end
 end
 
+# @param item [String] item name/key
+# @return [void]
 def take_item(item)
   case [@current_room, item]
   when [:battlefield, 'sword']
@@ -863,6 +944,7 @@ def take_item(item)
   end
 end
 
+# @return [Hash{Symbol=>Object}] weapon name and damage
 def current_weapon
   if @player_inventory.include?("spear") && @equipped_weapon == "spear"
     {name: "spear", damage: 10}
@@ -873,6 +955,7 @@ def current_weapon
   end
 end
 
+# @return [void]
 def show_inventory
   if @player_inventory.empty?
     puts "Your inventory is empty."
@@ -882,6 +965,8 @@ def show_inventory
   end
 end
 
+# @param item [String] item name/key
+# @return [void]
 def equip(item)
   weapons = ['spear', 'sword', 'fist']
   armor = ['Iron Helmet', 'Iron Chestplate', 'Iron Leggings']
@@ -907,6 +992,8 @@ def equip(item)
   end
 end
 
+# @param item [String] item name/key
+# @return [void]
 def unequip(item)
   weapons = ['spear', 'sword', 'fist']
   armor = ['Iron Helmet', 'Iron Chestplate', 'Iron Leggings']
@@ -928,6 +1015,8 @@ def unequip(item)
   end
 end
 
+# @param item [String] item name/key
+# @return [void]
 def use_item(item)
   if @player_inventory.include?(item)
     case item

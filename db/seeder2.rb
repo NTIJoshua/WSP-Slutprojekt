@@ -29,6 +29,9 @@ def create_tables(db)
       name TEXT NOT NULL UNIQUE,
       pwd_digest TEXT NOT NULL,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      is_admin INTEGER NOT NULL DEFAULT 0
+      failed_login_attempts INTEGER NOT NULL DEFAULT 0
+      locked_until TEXT
     )
   SQL
 
